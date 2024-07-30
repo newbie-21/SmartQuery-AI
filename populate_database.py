@@ -4,13 +4,18 @@ import shutil
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema.document import Document
-from get_embedding_function import get_embedding_function
-from langchain_chroma import Chroma
-import time
 from langchain_community.vectorstores import Chroma
+import time
+from get_embedding_function import get_embedding_function
 
-CHROMA_PATH = r"E:\Abdullah\Pycharm Projects\Conversation Bot Llama\chroma"
-DATA_PATH = r"E:\Abdullah\Pycharm Projects\Conversation Bot Llama\Data"
+
+CHROMA_PATH = "chroma"  # Directory to store the Chroma database
+DATA_PATH = "Data"  # Directory where PDF files are stored
+
+def get_embedding_function():
+    # Initialize HuggingFaceEmbeddings directly with model name
+    embeddings = HuggingFaceEmbeddings(model_name="distilbert-base-uncased")
+    return embeddings
 
 def main():
     parser = argparse.ArgumentParser()
@@ -42,11 +47,17 @@ def split_documents(documents: list[Document]):
     )
     return text_splitter.split_documents(documents)
 
+def add_to_chroma(chunks):
+    embedding_function = get_embedding_function()  # Use the local function
+    db = Chroma.from_documents(documents=chunks, embedding=embedding_function, persist_directory=CHROMA_PATH)
+    db.persist()
+    db.close()
+
 def add_to_chroma(chunks: list[Document]):
     print("Starting to add documents to Chroma...")
-    embedding_function = get_embedding_function()
+    embedding_function = get_embedding_function()  # This returns an instance of TransformerEmbedding
     persist_directory = CHROMA_PATH
-    db = Chroma.from_documents(documents=chunks, embedding=embedding_function, persist_directory=persist_directory)
+    db = Chroma.from_documents(documents=chunks, embedding=embedding_function.embed_documents, persist_directory=persist_directory)
 
     chunks_with_ids = calculate_chunk_ids(chunks)
     print(f"Calculated IDs for {len(chunks_with_ids)} chunks.")
@@ -101,3 +112,5 @@ def clear_database():
 
 if __name__ == "__main__":
     main()
+
+

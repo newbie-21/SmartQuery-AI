@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 from populate_database import load_documents, split_documents, add_to_chroma, clear_database
 from rag_query import query_rag
 
-CHROMA_PATH = r"E:\Abdullah\Pycharm Projects\Conversation Bot Llama\chroma"
-DATA_PATH = r"E:\Abdullah\Pycharm Projects\Conversation Bot Llama\Data"
+# Paths for cloud deployment
+CHROMA_PATH = "chroma"  # Use a relative path for cloud deployment
 MEMORY_FILE = "chat_memory.json"
 MEMORY_DURATION_DAYS = 3
 

@@ -1,0 +1,373 @@
+# populate_database.py -------------------------------------------------------------------------------------------------
+import argparse
+import os
+import shutil
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.schema.document import Document
+from get_embedding_function import get_embedding_function
+from langchain_chroma import Chroma
+import time
+from langchain_community.vectorstores import Chroma
+
+CHROMA_PATH = r"chroma"
+DATA_PATH = r"Data"
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--reset", action="store_true", help="Reset the database.")
+    args = parser.parse_args()
+    if args.reset:
+        print("✨ Clearing Database")
+        clear_database()
+
+    documents = load_documents()
+    chunks = split_documents(documents)
+    add_to_chroma(chunks)
+
+def load_documents():
+    document_loader = PyPDFDirectoryLoader(DATA_PATH)
+    print("Starting to load documents...")
+    start_time = time.time()
+    documents = document_loader.load()
+    end_time = time.time()
+    print(f"Loaded {len(documents)} documents in {end_time - start_time:.2f} seconds.")
+    return documents
+
+def split_documents(documents: list[Document]):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=80,
+        length_function=len,
+        is_separator_regex=False,
+    )
+    return text_splitter.split_documents(documents)
+
+def add_to_chroma(chunks: list[Document]):
+    print("Starting to add documents to Chroma...")
+    embedding_function = get_embedding_function()
+    persist_directory = CHROMA_PATH
+    db = Chroma.from_documents(documents=chunks, embedding=embedding_function, persist_directory=persist_directory)
+
+    chunks_with_ids = calculate_chunk_ids(chunks)
+    print(f"Calculated IDs for {len(chunks_with_ids)} chunks.")
+
+    existing_items = db.get(include=[])  # IDs are always included by default
+    existing_ids = set(existing_items["ids"])
+    print(f"Number of existing documents in DB: {len(existing_ids)}")
+
+    new_chunks = [chunk for chunk in chunks_with_ids if chunk.metadata["id"] not in existing_ids]
+
+    if new_chunks:
+        print(f"Adding new documents: {len(new_chunks)}")
+        new_chunk_ids = [chunk.metadata["id"] for chunk in new_chunks]
+        print(f"New chunk IDs: {new_chunk_ids[:10]}...")
+
+        batch_size = 50  # Adjust the batch size as needed
+        for i in range(0, len(new_chunks), batch_size):
+            batch = new_chunks[i:i + batch_size]
+            batch_ids = new_chunk_ids[i:i + batch_size]
+            print(f"Adding batch {i // batch_size + 1} of {len(new_chunks) // batch_size + 1}...")
+            db.add_documents(batch, ids=batch_ids)
+            print(f"Batch {i // batch_size + 1} added.")
+
+        print("All documents added. Database changes are automatically persisted.")
+    else:
+        print("No new documents to add")
+
+def calculate_chunk_ids(chunks):
+    last_page_id = None
+    current_chunk_index = 0
+
+    for chunk in chunks:
+        source = chunk.metadata.get("source")
+        page = chunk.metadata.get("page")
+        current_page_id = f"{source}:{page}"
+
+        if current_page_id == last_page_id:
+            current_chunk_index += 1
+        else:
+             current_chunk_index = 0
+
+        chunk_id = f"{current_page_id}:{current_chunk_index}"
+        last_page_id = current_page_id
+
+        chunk.metadata["id"] = chunk_id
+
+    return chunks
+
+def clear_database():
+    if os.path.exists(CHROMA_PATH):
+        shutil.rmtree(CHROMA_PATH)
+
+if __name__ == "__main__":
+    main()
+
+# raq_query.py V1-------------------------------------------------------------------------------------------------------
+import argparse
+from langchain_chroma import Chroma
+from langchain.prompts import ChatPromptTemplate
+from langchain_community.llms.ollama import Ollama
+from get_embedding_function import get_embedding_function
+import time
+import json
+import os
+from datetime import datetime, timedelta
+
+CHROMA_PATH = r"chroma"
+MEMORY_FILE = "chat_memory.json"
+MEMORY_DURATION_DAYS = 3
+
+PROMPT_TEMPLATE = """
+Answer the question based only on the following context:
+
+{context}
+
+---
+
+Answer the question based on the above context: {question}
+"""
+
+
+def main():
+    # Create CLI.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("query_text", type=str, help="The query text.")
+    args = parser.parse_args()
+    query_text = args.query_text
+    query_rag(query_text)
+
+
+def query_rag(query_text: str):
+    # Prepare the DB.
+    embedding_function = get_embedding_function()
+    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
+
+    # Search the DB.
+    results = db.similarity_search_with_score(query_text, k=5)
+
+    context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
+    prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+    prompt = prompt_template.format(context=context_text, question=query_text)
+    # print(prompt)
+
+    model = Ollama(model="llama3.1")
+    response_text = model.invoke(prompt)
+
+    sources = [doc.metadata.get("id", None) for doc, _score in results]
+    formatted_response = f"Response: {response_text}" # \nSources: {sources}
+    print(formatted_response)
+    return response_text
+
+
+if __name__ == "__main__":
+    main()
+
+# raq_query.py V2-------------------------------------------------------------------------------------------------------
+import argparse
+from langchain_chroma import Chroma
+from langchain.prompts import ChatPromptTemplate
+from langchain_community.llms.ollama import Ollama
+from get_embedding_function import get_embedding_function
+import time
+import json
+import os
+from datetime import datetime, timedelta
+
+CHROMA_PATH = r"chroma"
+MEMORY_FILE = "chat_memory.json"
+MEMORY_DURATION_DAYS = 3
+PROMPT_TEMPLATE = """
+You are an AI assistant. Use the following context to answer the question. If the context does not contain the information needed, use your pre-trained knowledge to provide a comprehensive answer.
+
+Context:
+{context}
+
+---
+
+Question: {question}
+
+Answer:
+"""
+
+CASUAL_CONVERSATIONS = {
+    "hello": "Hello! How can I help you today?",
+    "hi": "Hi there! What can I do for you?",
+    "how are you": "I'm an AI, so I don't have feelings, but I'm here to help you!",
+    "goodbye": "Goodbye! Have a great day!",
+    "bye": "Bye! Take care!"
+}
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("query_text", type=str, help="The query text.")
+    args = parser.parse_args()
+    query_text = args.query_text
+    response_text = query_rag(query_text)
+    print(response_text)
+
+def query_rag(query_text: str):
+    # Handle casual conversation
+    for trigger, response in CASUAL_CONVERSATIONS.items():
+        if trigger in query_text.lower():
+            return response
+
+    # Load memory
+    memory = load_memory()
+    if memory:
+        memory_context = "\n\n".join([f"User: {entry['user']}\nBot: {entry['bot']}" for entry in memory])
+    else:
+        memory_context = ""
+
+    # Prepare the DB
+    embedding_function = get_embedding_function()
+    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
+
+    # Search the DB
+    results = db.similarity_search_with_score(query_text, k=5)
+    context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
+
+    combined_context = f"{memory_context}\n\n---\n\n{context_text}".strip()
+    prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+    prompt = prompt_template.format(context=combined_context, question=query_text)
+
+    model = Ollama(model="llama3.1")
+    response_text = model.invoke(prompt)
+
+    # Save memory
+    memory.append({"user": query_text, "bot": response_text})
+    save_memory(memory)
+
+    return response_text
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r") as file:
+            try:
+                memory_data = json.load(file)
+            except json.JSONDecodeError:
+                return []
+        timestamp = memory_data.get("timestamp")
+        memory = memory_data.get("memory")
+        if datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S") + timedelta(days=MEMORY_DURATION_DAYS) > datetime.now():
+            return memory
+    return []
+
+def save_memory(memory):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(MEMORY_FILE, "w") as file:
+        json.dump({"timestamp": timestamp, "memory": memory}, file)
+
+if __name__ == "__main__":
+    main()
+
+# get_embedding_function.py V2------------------------------------------------------------------------------------------
+from langchain_community.embeddings.ollama import OllamaEmbeddings
+
+
+def get_embedding_function():
+    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    return embeddings
+
+# Streamlit.py.py V2----------------------------------------------------------------------------------------------------
+import streamlit as st
+from streamlit_chat import message
+import os
+import tempfile
+import json
+from datetime import datetime, timedelta
+from populate_database import load_documents, split_documents, add_to_chroma, clear_database
+from rag_query import query_rag
+
+CHROMA_PATH = r"chroma"
+DATA_PATH = r"Data"
+MEMORY_FILE = "chat_memory.json"
+MEMORY_DURATION_DAYS = 3
+
+# Initialize the Streamlit application
+st.set_page_config(
+    page_title="Conversational RAG System",
+    page_icon=":robot:",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+def update_database(uploaded_file_path):
+    global DATA_PATH
+    original_data_path = DATA_PATH
+    DATA_PATH = os.path.dirname(uploaded_file_path)
+    documents = load_documents()
+    chunks = split_documents(documents)
+    add_to_chroma(chunks)
+    DATA_PATH = original_data_path
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r") as file:
+            try:
+                memory_data = json.load(file)
+            except json.JSONDecodeError:
+                return []
+        timestamp = memory_data.get("timestamp")
+        memory = memory_data.get("memory")
+        if datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S") + timedelta(days=MEMORY_DURATION_DAYS) > datetime.now():
+            return memory
+    return []
+
+def save_memory(memory):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(MEMORY_FILE, "w") as file:
+        json.dump({"timestamp": timestamp, "memory": memory}, file)
+
+def clear_memory():
+    if os.path.exists(MEMORY_FILE):
+        os.remove(MEMORY_FILE)
+
+# Function to handle user input
+def handle_input():
+    user_input = st.session_state['input']
+    if user_input:
+        casual_greetings = ["hello", "hi", "hey", "how are you", "good morning", "good afternoon", "good evening", "hola", "ohio", "wassup", "heya"]
+        if user_input.lower() in casual_greetings:
+            response = "Hello! How can I assist you today?"
+        else:
+            response = query_rag(user_input)
+        st.session_state['history'].append({"user": user_input, "bot": response})
+        memory = st.session_state['history']
+        save_memory(memory)
+        st.session_state['input'] = ''  # Clear input box after submitting
+
+# Load chat history
+if 'history' not in st.session_state:
+    st.session_state['history'] = load_memory()
+
+# Sidebar for document upload and restart chat
+with st.sidebar:
+    st.title("Pannel")
+
+    if st.button("Restart Chat"):
+        st.session_state['history'] = []
+        clear_memory()
+        st.experimental_set_query_params()  # Refresh the app
+
+    with st.expander("Upload New Pdf Document", expanded=False):
+        uploaded_file = st.file_uploader("Choose a file", type=["pdf"])  # Adjust file types as necessary
+        if uploaded_file is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                temp_file.write(uploaded_file.read())
+                temp_file_path = temp_file.name
+            with st.spinner("Processing and updating database..."):
+                update_database(temp_file_path)
+                st.success("Database updated successfully!")
+            os.remove(temp_file_path)
+
+# Main chat interface
+st.title("SmartQuery AI")
+
+# Persistent text input at the top
+st.text_input("You:", key="input", on_change=handle_input)
+
+# Display chat history
+for idx, chat in reversed(list(enumerate(st.session_state['history']))):
+    message(chat['user'], is_user=True, key=f"user_{idx}")
+    message(chat['bot'], is_user=False, key=f"bot_{idx}")
