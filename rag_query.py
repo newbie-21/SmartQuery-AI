@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta
 from langchain.vectorstores import Chroma
 from langchain.prompts import ChatPromptTemplate
+from langchain_community.llms import Ollama
 from get_embedding_function import get_embedding_function, TransformerEmbedding
 
 # Update these paths to cloud storage if necessary
